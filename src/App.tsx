@@ -85,7 +85,7 @@ Respond in this exact JSON format (no markdown, no backticks):
 // ─── Claude Vision API call ───
 async function generateQuestionAPI(base64Image, mediaType, subject, difficulty) {
   const diffObj = DIFFICULTY_LEVELS.find((d) => d.id === difficulty);
-  const response = await fetch("/api/chat", {
+  const response = await fetch("/api/anthropic/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -136,13 +136,13 @@ function compressImage(file, maxDim = 300, quality = 0.6) {
   });
 }
 
-// ─── Shared persistent storage helpers ───
+// ─── localStorage-based storage helpers (replaces window.storage) ───
 async function publishQuestion(questionData) {
   const id = `geoq:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let index = [];
   try {
-    const existing = await window.storage.get("geoq-index", true);
-    if (existing) index = JSON.parse(existing.value);
+    const existing = localStorage.getItem("geoq-index");
+    if (existing) index = JSON.parse(existing);
   } catch {}
   index.push({
     id, lat: questionData.lat, lng: questionData.lng,
@@ -150,16 +150,16 @@ async function publishQuestion(questionData) {
     timestamp: Date.now(),
   });
   if (index.length > 200) index = index.slice(-200);
-  await window.storage.set("geoq-index", JSON.stringify(index), true);
-  await window.storage.set(id, JSON.stringify(questionData), true);
+  localStorage.setItem("geoq-index", JSON.stringify(index));
+  localStorage.setItem(id, JSON.stringify(questionData));
   return id;
 }
 
 async function loadNearbyQuestions(userLat, userLng, radiusMeters = 50000) {
   let index = [];
   try {
-    const existing = await window.storage.get("geoq-index", true);
-    if (existing) index = JSON.parse(existing.value);
+    const existing = localStorage.getItem("geoq-index");
+    if (existing) index = JSON.parse(existing);
   } catch { return []; }
   const nearby = index
     .map((e) => ({ ...e, distance: haversineDistance(userLat, userLng, e.lat, e.lng) }))
@@ -168,8 +168,8 @@ async function loadNearbyQuestions(userLat, userLng, radiusMeters = 50000) {
   const results = [];
   for (const entry of nearby.slice(0, 20)) {
     try {
-      const data = await window.storage.get(entry.id, true);
-      if (data) results.push({ ...entry, ...JSON.parse(data.value) });
+      const data = localStorage.getItem(entry.id);
+      if (data) results.push({ ...entry, ...JSON.parse(data) });
     } catch {}
   }
   return results;
