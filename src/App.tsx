@@ -98,7 +98,7 @@ function buildSystemPrompt(subject, difficulty) {
   const subj = SUBJECTS.find((s) => s.id === subject);
   return `You are an expert educational content creator specializing in ${subj.label}.
 
-Your task: Analyze the provided image and generate ONE high-quality educational question that meaningfully incorporates specific visual elements from the image within the framework of ${subj.label}.
+Your task: Analyze the provided image and generate ONE high-quality multiple-choice question (4 choices) that meaningfully incorporates specific visual elements from the image within the framework of ${subj.label}.
 
 Subject-specific strategies: ${subj.strategy}
 Difficulty: ${difficulty.label} (${difficulty.ages})
@@ -109,12 +109,23 @@ CRITICAL RULES:
 3. The question MUST require the student to reference or think about the image.
 4. If the image has no clear connection to ${subj.label}, creatively bridge the gap.
 5. Make the question age-appropriate for ${difficulty.ages}.
+6. Create exactly 4 answer choices (A, B, C, D). Only ONE should be correct.
+7. Wrong answers should be plausible but clearly incorrect to someone who understands the concept.
+8. Do NOT make the correct answer obvious by length or phrasing.
 
 Respond in this exact JSON format (no markdown, no backticks):
 {
   "image_analysis": "Brief description of key elements observed in the image",
-  "question": "The educational question text",
-  "hint": "A helpful hint for the student",
+  "question": "The multiple-choice question text",
+  "choices": {
+    "A": "First answer choice",
+    "B": "Second answer choice",
+    "C": "Third answer choice",
+    "D": "Fourth answer choice"
+  },
+  "correct_answer": "A",
+  "explanation": "Brief explanation of why the correct answer is right",
+  "hint": "A helpful hint for the student (do NOT reveal the answer)",
   "learning_objective": "What concept or skill this question targets",
   "why_this_image": "How the image specifically connects to this question (1 sentence)"
 }`;
@@ -365,6 +376,8 @@ function MainApp({ user }) {
   const [expandedPin, setExpandedPin] = useState(null);
   const [showAnswer, setShowAnswer] = useState({});
   const [mapView, setMapView] = useState("split");
+  const [selectedChoice, setSelectedChoice] = useState(null);
+  const [exploreChoices, setExploreChoices] = useState({});
 
   // My Questions
   const [myQuestions, setMyQuestions] = useState([]);
@@ -415,7 +428,7 @@ function MainApp({ user }) {
   // ── Generate ──
   const handleGenerate = async () => {
     if (!image || !subject) return;
-    setLoading(true); setError(null); setResult(null); setPublished(false); setPublishError(null);
+    setLoading(true); setError(null); setResult(null); setPublished(false); setPublishError(null); setSelectedChoice(null);
     try { setResult(await generateQuestionAPI(image.base64, image.mediaType, subject, difficulty)); }
     catch (err) { setError(err.message || "Failed to generate question."); }
     finally { setLoading(false); }
@@ -461,6 +474,9 @@ function MainApp({ user }) {
         subject,
         difficulty,
         question: result.question,
+        choices: result.choices || {},
+        correct_answer: result.correct_answer || "",
+        explanation: result.explanation || "",
         hint: result.hint,
         learning_objective: result.learning_objective,
         image_analysis: result.image_analysis,
@@ -525,7 +541,7 @@ function MainApp({ user }) {
   const handleReset = () => {
     if (image?.preview) URL.revokeObjectURL(image.preview);
     setImage(null); setSubject(null); setResult(null); setError(null);
-    setDifficulty("middle"); setPublished(false); setGeoError(null); setPublishError(null);
+    setDifficulty("middle"); setPublished(false); setGeoError(null); setPublishError(null); setSelectedChoice(null);
   };
 
   const selectedSubject = SUBJECTS.find((s) => s.id === subject);
@@ -749,10 +765,70 @@ function MainApp({ user }) {
                   <p style={S.qText}>{result.question}</p>
                 </div>
 
-                <details style={S.hintBox}>
-                  <summary style={S.hintSum}>💡 Hint</summary>
-                  <p style={S.hintP}>{result.hint}</p>
-                </details>
+                {/* Multiple Choice Options */}
+                {result.choices && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {["A", "B", "C", "D"].map((letter) => {
+                      if (!result.choices[letter]) return null;
+                      const isSelected = selectedChoice === letter;
+                      const isCorrect = letter === result.correct_answer;
+                      const answered = selectedChoice !== null;
+                      let bg = "#FAFBFC";
+                      let border = "#E8EAED";
+                      let textColor = "#344054";
+                      if (answered && isCorrect) { bg = "#ECFDF3"; border = "#12B76A"; textColor = "#027A48"; }
+                      else if (isSelected && !isCorrect) { bg = "#FEF0ED"; border = "#E8553A"; textColor = "#B42318"; }
+                      else if (answered) { bg = "#F9FAFB"; border = "#E8EAED"; textColor = "#98A2B3"; }
+                      return (
+                        <button key={letter} onClick={() => { if (!selectedChoice) setSelectedChoice(letter); }}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10,
+                            border: `2px solid ${border}`, background: bg, cursor: answered ? "default" : "pointer",
+                            transition: "all 0.2s", textAlign: "left", fontFamily: "'DM Sans', sans-serif",
+                            transform: !answered ? "scale(1)" : undefined,
+                          }}>
+                          <span style={{
+                            width: 30, height: 30, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                            fontSize: 13, fontWeight: 700, flexShrink: 0,
+                            background: answered && isCorrect ? "#12B76A" : isSelected && !isCorrect ? "#E8553A" : answered ? "#F4F5F7" : selectedSubject?.bg || "#EDF2FE",
+                            color: answered && (isCorrect || isSelected) ? "#fff" : selectedSubject?.color || "#344054",
+                          }}>
+                            {answered && isCorrect ? "✓" : answered && isSelected && !isCorrect ? "✕" : letter}
+                          </span>
+                          <span style={{ fontSize: 14, fontWeight: isSelected || (answered && isCorrect) ? 600 : 400, color: textColor, lineHeight: 1.4 }}>
+                            {result.choices[letter]}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Answer feedback */}
+                {selectedChoice && (
+                  <div style={{
+                    padding: "12px 14px", borderRadius: 8,
+                    background: selectedChoice === result.correct_answer ? "#ECFDF3" : "#FEF0ED",
+                    border: `1px solid ${selectedChoice === result.correct_answer ? "#A6F4C5" : "#FECDCA"}`,
+                  }}>
+                    <p style={{
+                      margin: 0, fontSize: 14, fontWeight: 700,
+                      color: selectedChoice === result.correct_answer ? "#027A48" : "#B42318",
+                    }}>
+                      {selectedChoice === result.correct_answer ? "✓ Correct!" : `✕ Incorrect — the answer is ${result.correct_answer}`}
+                    </p>
+                    {result.explanation && (
+                      <p style={{ margin: "6px 0 0", fontSize: 13, color: "#344054", lineHeight: 1.5 }}>{result.explanation}</p>
+                    )}
+                  </div>
+                )}
+
+                {!selectedChoice && (
+                  <details style={S.hintBox}>
+                    <summary style={S.hintSum}>💡 Hint</summary>
+                    <p style={S.hintP}>{result.hint}</p>
+                  </details>
+                )}
 
                 <div style={S.metaGrid}>
                   <div style={S.metaItem}><p style={S.metaLabel}>Learning Objective</p><p style={S.metaVal}>{result.learning_objective}</p></div>
@@ -899,10 +975,57 @@ function MainApp({ user }) {
                               <div style={S.dot} />
                               <div><p style={S.metaLabel}>What's in the image</p><p style={S.aText}>{q.image_analysis}</p></div>
                             </div>
-                            <details style={S.hintBox}>
-                              <summary style={S.hintSum}>💡 Need a hint?</summary>
-                              <p style={S.hintP}>{q.hint}</p>
-                            </details>
+
+                            {/* MCQ choices */}
+                            {q.choices && (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {["A", "B", "C", "D"].map((letter) => {
+                                  if (!q.choices[letter]) return null;
+                                  const myChoice = exploreChoices[i];
+                                  const isSelected = myChoice === letter;
+                                  const isCorrect = letter === q.correct_answer;
+                                  const answered = myChoice != null;
+                                  let bg = "#FAFBFC"; let border = "#E8EAED"; let tc = "#344054";
+                                  if (answered && isCorrect) { bg = "#ECFDF3"; border = "#12B76A"; tc = "#027A48"; }
+                                  else if (isSelected && !isCorrect) { bg = "#FEF0ED"; border = "#E8553A"; tc = "#B42318"; }
+                                  else if (answered) { bg = "#F9FAFB"; border = "#E8EAED"; tc = "#98A2B3"; }
+                                  return (
+                                    <button key={letter} onClick={() => { if (!myChoice) setExploreChoices((p) => ({ ...p, [i]: letter })); }}
+                                      style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 8,
+                                        border: `2px solid ${border}`, background: bg, cursor: answered ? "default" : "pointer",
+                                        transition: "all 0.2s", textAlign: "left", fontFamily: "'DM Sans', sans-serif" }}>
+                                      <span style={{ width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                                        fontSize: 11, fontWeight: 700, flexShrink: 0,
+                                        background: answered && isCorrect ? "#12B76A" : isSelected && !isCorrect ? "#E8553A" : "#F4F5F7",
+                                        color: answered && (isCorrect || isSelected) ? "#fff" : "#344054" }}>
+                                        {answered && isCorrect ? "✓" : answered && isSelected && !isCorrect ? "✕" : letter}
+                                      </span>
+                                      <span style={{ fontSize: 13, fontWeight: isSelected || (answered && isCorrect) ? 600 : 400, color: tc }}>{q.choices[letter]}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            {exploreChoices[i] && (
+                              <div style={{ padding: "10px 12px", borderRadius: 8,
+                                background: exploreChoices[i] === q.correct_answer ? "#ECFDF3" : "#FEF0ED",
+                                border: `1px solid ${exploreChoices[i] === q.correct_answer ? "#A6F4C5" : "#FECDCA"}` }}>
+                                <p style={{ margin: 0, fontSize: 13, fontWeight: 700,
+                                  color: exploreChoices[i] === q.correct_answer ? "#027A48" : "#B42318" }}>
+                                  {exploreChoices[i] === q.correct_answer ? "✓ Correct!" : `✕ Incorrect — the answer is ${q.correct_answer}`}
+                                </p>
+                                {q.explanation && <p style={{ margin: "4px 0 0", fontSize: 12, color: "#344054", lineHeight: 1.5 }}>{q.explanation}</p>}
+                              </div>
+                            )}
+
+                            {!exploreChoices[i] && (
+                              <details style={S.hintBox}>
+                                <summary style={S.hintSum}>💡 Need a hint?</summary>
+                                <p style={S.hintP}>{q.hint}</p>
+                              </details>
+                            )}
+
                             <button onClick={(e) => { e.stopPropagation(); setShowAnswer((p) => ({ ...p, [i]: !p[i] })); }} style={S.secBtn}>
                               {showAnswer[i] ? "Hide" : "Show"} Learning Objective
                             </button>
