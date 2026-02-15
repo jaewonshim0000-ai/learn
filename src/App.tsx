@@ -3,21 +3,16 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { db } from "./firebase";
+import { db, auth, googleProvider } from "./firebase";
 import {
-  collection,
-  addDoc,
-  getDocs,
-  query,
-  orderBy,
-  limit,
-  serverTimestamp,
-  Timestamp,
+  collection, addDoc, getDocs, query, orderBy, limit, serverTimestamp,
 } from "firebase/firestore";
+import {
+  onAuthStateChanged, signInWithPopup, signOut,
+} from "firebase/auth";
 
 // ─────────────────────────────────────────────────────────────
 // EduVision — AI-Powered Educational Question Generator
-// + GeoPin: Share & discover questions by location
 // ─────────────────────────────────────────────────────────────
 
 const SUBJECTS = [
@@ -40,7 +35,7 @@ const TABS = [
   { id: "my", label: "My Questions", icon: "✎" },
 ];
 
-// ─── Custom map marker SVG builder ───
+// ─── Map icons ───
 function createSubjectIcon(color, icon) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="46" viewBox="0 0 36 46">
     <path d="M18 0C8.06 0 0 8.06 0 18c0 13.5 18 28 18 28s18-14.5 18-28C36 8.06 27.94 0 18 0z" fill="${color}" stroke="#fff" stroke-width="2"/>
@@ -64,7 +59,7 @@ function RecenterMap({ lat, lng, zoom }) {
   return null;
 }
 
-// ─── Haversine distance ───
+// ─── Utilities ───
 function haversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -74,11 +69,11 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function formatDistance(meters) {
-  if (meters < 100) return `${Math.round(meters)}m away`;
-  if (meters < 1000) return `${Math.round(meters / 10) * 10}m away`;
-  if (meters < 10000) return `${(meters / 1000).toFixed(1)}km away`;
-  return `${Math.round(meters / 1000)}km away`;
+function formatDistance(m) {
+  if (m < 100) return `${Math.round(m)}m away`;
+  if (m < 1000) return `${Math.round(m / 10) * 10}m away`;
+  if (m < 10000) return `${(m / 1000).toFixed(1)}km away`;
+  return `${Math.round(m / 1000)}km away`;
 }
 
 function timeAgo(ts) {
@@ -88,18 +83,17 @@ function timeAgo(ts) {
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function radiusToZoom(radius) {
-  if (radius <= 1000) return 15;
-  if (radius <= 5000) return 13;
-  if (radius <= 25000) return 11;
+function radiusToZoom(r) {
+  if (r <= 1000) return 15;
+  if (r <= 5000) return 13;
+  if (r <= 25000) return 11;
   return 9;
 }
 
-// ─── System prompt builder ───
+// ─── Prompts & API ───
 function buildSystemPrompt(subject, difficulty) {
   const subj = SUBJECTS.find((s) => s.id === subject);
   return `You are an expert educational content creator specializing in ${subj.label}.
@@ -126,7 +120,6 @@ Respond in this exact JSON format (no markdown, no backticks):
 }`;
 }
 
-// ─── Claude Vision API call ───
 async function generateQuestionAPI(base64Image, mediaType, subject, difficulty) {
   const diffObj = DIFFICULTY_LEVELS.find((d) => d.id === difficulty);
   const response = await fetch("/api/anthropic/v1/messages", {
@@ -165,21 +158,26 @@ function fileToBase64(file) {
 }
 
 function compressImage(file, maxDim = 300, quality = 0.6) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const canvas = document.createElement("canvas");
-      const scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
-      canvas.width = img.width * scale;
-      canvas.height = img.height * scale;
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+      try {
+        const canvas = document.createElement("canvas");
+        const scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality).split(",")[1]);
+      } catch (e) {
+        reject(e);
+      }
     };
+    img.onerror = () => reject(new Error("Failed to load image for compression"));
     img.src = URL.createObjectURL(file);
   });
 }
 
-// ─── Firebase Firestore helpers ───
+// ─── Firestore helpers ───
 async function publishQuestionToFirestore(questionData) {
   const docRef = await addDoc(collection(db, "questions"), {
     ...questionData,
@@ -204,34 +202,52 @@ async function loadNearbyQuestions(userLat, userLng, radiusMeters = 50000) {
     .slice(0, 30);
 }
 
-async function loadUserQuestions(username) {
+async function loadUserQuestions(uid) {
   const allQuestions = await loadAllQuestions();
-  return allQuestions.filter((q) => q.username === username);
+  return allQuestions.filter((q) => q.uid === uid);
 }
 
-// ─── Avatar color from username ───
-function avatarColor(name) {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  const colors = ["#E8553A", "#2B7A5F", "#3A6BE8", "#9B5DE5", "#D4851F", "#E84393", "#00B894", "#6C5CE7"];
-  return colors[Math.abs(hash) % colors.length];
+// ─── Geolocation helper (standalone, not a hook) ───
+function getCurrentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      return reject(new Error("Geolocation not supported by your browser."));
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+      (err) => {
+        if (err.code === 1) reject(new Error("Location access denied. Please enable permissions."));
+        else if (err.code === 2) reject(new Error("Location unavailable. Try again."));
+        else reject(new Error("Location request timed out."));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
-// Login Screen
+// Login Screen — Google Sign-In
 // ══════════════════════════════════════════════════════════════
-function LoginScreen({ onLogin }) {
-  const [username, setUsername] = useState("");
+function LoginScreen() {
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const handleSubmit = () => {
-    const trimmed = username.trim();
-    if (!trimmed) return setError("Please enter a username.");
-    if (trimmed.length < 2) return setError("Username must be at least 2 characters.");
-    if (trimmed.length > 20) return setError("Username must be 20 characters or fewer.");
-    if (!/^[a-zA-Z0-9_]+$/.test(trimmed)) return setError("Only letters, numbers, and underscores allowed.");
-    localStorage.setItem("eduvision-user", trimmed);
-    onLogin(trimmed);
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      if (err.code === "auth/popup-closed-by-user") {
+        setError("Sign-in cancelled. Try again.");
+      } else if (err.code === "auth/popup-blocked") {
+        setError("Pop-up blocked by browser. Please allow pop-ups and try again.");
+      } else {
+        setError(err.message || "Sign-in failed. Please try again.");
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -252,33 +268,30 @@ function LoginScreen({ onLogin }) {
 
         <div style={LS.divider} />
 
-        <h2 style={LS.heading}>Welcome! Choose a username</h2>
-        <p style={LS.desc}>Pick any username to get started. No password needed — this is a demo.</p>
+        <h2 style={LS.heading}>Welcome to EduVision</h2>
+        <p style={LS.desc}>Sign in to create AI-powered questions from images and pin them to real-world locations for others to discover.</p>
 
-        <div style={LS.inputWrap}>
-          <span style={LS.at}>@</span>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => { setUsername(e.target.value); setError(null); }}
-            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-            placeholder="your_username"
-            style={LS.input}
-            maxLength={20}
-            autoFocus
-          />
-        </div>
-        {error && <p style={LS.error}>{error}</p>}
-
-        <button onClick={handleSubmit} style={LS.btn}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 8 }}>
-            <path d="M8 1v6m0 0v6m0-6h6m-6 0H2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-          Start Learning
+        <button onClick={handleGoogleSignIn} disabled={loading} style={LS.googleBtn}>
+          {loading ? (
+            <span style={{ display: "inline-block", width: 20, height: 20, border: "2.5px solid #ddd", borderTopColor: "#4285F4", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+          ) : (
+            <>
+              <svg width="20" height="20" viewBox="0 0 24 24" style={{ marginRight: 10, flexShrink: 0 }}>
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+              </svg>
+              Continue with Google
+            </>
+          )}
         </button>
 
-        <p style={LS.foot}>Your questions will be saved & visible to others nearby.</p>
+        {error && <p style={LS.error}>{error}</p>}
+
+        <p style={LS.foot}>Your questions will be saved to your account and visible to others nearby.</p>
       </div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
@@ -291,31 +304,42 @@ const LS = {
   subtitle: { fontSize: 10, color: "#667085", margin: 0, marginTop: 1, letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: 600 },
   divider: { height: 1, background: "#E8EAED", margin: "0 0 24px" },
   heading: { fontFamily: "'DM Serif Display', serif", fontSize: 20, margin: "0 0 6px", color: "#1A1A2E" },
-  desc: { fontSize: 13, color: "#667085", margin: "0 0 20px", lineHeight: 1.5 },
-  inputWrap: { display: "flex", alignItems: "center", border: "2px solid #E8EAED", borderRadius: 10, overflow: "hidden", transition: "border-color 0.2s", marginBottom: 8 },
-  at: { padding: "0 0 0 14px", fontSize: 15, color: "#98A2B3", fontWeight: 600 },
-  input: { flex: 1, border: "none", outline: "none", padding: "12px 14px 12px 6px", fontSize: 15, fontFamily: "'DM Sans', sans-serif", color: "#1A1A2E", background: "transparent" },
-  error: { fontSize: 12, color: "#B42318", margin: "0 0 8px" },
-  btn: { width: "100%", padding: "13px 20px", borderRadius: 10, border: "none", background: "#1A1A2E", color: "#fff", fontSize: 15, fontWeight: 700, fontFamily: "'DM Sans', sans-serif", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 12, transition: "opacity 0.15s" },
-  foot: { fontSize: 11, color: "#98A2B3", textAlign: "center", margin: "16px 0 0", lineHeight: 1.5 },
+  desc: { fontSize: 13, color: "#667085", margin: "0 0 24px", lineHeight: 1.6 },
+  googleBtn: { width: "100%", padding: "13px 20px", borderRadius: 10, border: "1px solid #D0D5DD", background: "#fff", color: "#344054", fontSize: 15, fontWeight: 600, fontFamily: "'DM Sans', sans-serif", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.15s", boxShadow: "0 1px 3px rgba(0,0,0,0.08)" },
+  error: { fontSize: 12, color: "#B42318", margin: "12px 0 0", textAlign: "center" },
+  foot: { fontSize: 11, color: "#98A2B3", textAlign: "center", margin: "20px 0 0", lineHeight: 1.5 },
 };
+
+// ══════════════════════════════════════════════════════════════
+// Root App — auth listener
+// ══════════════════════════════════════════════════════════════
+export default function EduVision() {
+  const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUser(u || null));
+    return unsub;
+  }, []);
+
+  // Loading state
+  if (user === undefined) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'DM Sans', sans-serif", background: "#F8F9FB" }}>
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@500&display=swap" rel="stylesheet" />
+        <p style={{ color: "#667085", fontSize: 14 }}>Loading…</p>
+      </div>
+    );
+  }
+
+  if (!user) return <LoginScreen />;
+
+  return <MainApp user={user} />;
+}
 
 // ══════════════════════════════════════════════════════════════
 // Main App
 // ══════════════════════════════════════════════════════════════
-export default function EduVision() {
-  // ── Auth state ──
-  const [currentUser, setCurrentUser] = useState(() => localStorage.getItem("eduvision-user") || null);
-
-  // If not logged in, show login screen
-  if (!currentUser) {
-    return <LoginScreen onLogin={(u) => setCurrentUser(u)} />;
-  }
-
-  return <MainApp currentUser={currentUser} onLogout={() => { localStorage.removeItem("eduvision-user"); setCurrentUser(null); }} />;
-}
-
-function MainApp({ currentUser, onLogout }) {
+function MainApp({ user }) {
   const [tab, setTab] = useState("create");
   const [image, setImage] = useState(null);
   const [subject, setSubject] = useState(null);
@@ -326,14 +350,13 @@ function MainApp({ currentUser, onLogout }) {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Geo state
+  // Geo
   const [userLocation, setUserLocation] = useState(null);
   const [geoError, setGeoError] = useState(null);
-  const [geoLoading, setGeoLoading] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [published, setPublished] = useState(false);
 
-  // Explore state
+  // Explore
   const [nearbyQuestions, setNearbyQuestions] = useState([]);
   const [exploreLoading, setExploreLoading] = useState(false);
   const [searchRadius, setSearchRadius] = useState(5000);
@@ -341,7 +364,7 @@ function MainApp({ currentUser, onLogout }) {
   const [showAnswer, setShowAnswer] = useState({});
   const [mapView, setMapView] = useState("split");
 
-  // My Questions state
+  // My Questions
   const [myQuestions, setMyQuestions] = useState([]);
   const [myLoading, setMyLoading] = useState(false);
 
@@ -355,35 +378,22 @@ function MainApp({ currentUser, onLogout }) {
     return icons;
   }, []);
 
-  // ── Request GPS ──
-  const requestLocation = useCallback(() => {
-    if (userLocation) return Promise.resolve(userLocation);
-    setGeoLoading(true);
+  // Display name helper
+  const displayName = user.displayName || user.email?.split("@")[0] || "User";
+  const photoURL = user.photoURL;
+
+  // ── Get location (caches in state) ──
+  const getLocation = useCallback(async () => {
+    if (userLocation) return userLocation;
     setGeoError(null);
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        setGeoError("Geolocation not supported by your browser.");
-        setGeoLoading(false);
-        return reject();
-      }
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
-          setUserLocation(loc);
-          setGeoLoading(false);
-          resolve(loc);
-        },
-        (err) => {
-          setGeoError(
-            err.code === 1 ? "Location access denied. Please enable permissions." :
-            err.code === 2 ? "Location unavailable. Try again." : "Location request timed out."
-          );
-          setGeoLoading(false);
-          reject();
-        },
-        { enableHighAccuracy: true, timeout: 10000 }
-      );
-    });
+    try {
+      const loc = await getCurrentPosition();
+      setUserLocation(loc);
+      return loc;
+    } catch (err) {
+      setGeoError(err.message);
+      throw err;
+    }
   }, [userLocation]);
 
   // ── File handling ──
@@ -409,46 +419,77 @@ function MainApp({ currentUser, onLogout }) {
     finally { setLoading(false); }
   };
 
-  // ── Publish to Firestore ──
+  // ── Publish — fixed flow ──
   const handlePublish = async () => {
     if (!result) return;
-    setPublishing(true); setError(null);
+    setPublishing(true);
+    setError(null);
+    setGeoError(null);
     try {
-      const loc = await requestLocation();
-      const thumbnail = await compressImage(image.file);
+      // 1. Get location
+      const loc = await getLocation();
+
+      // 2. Compress thumbnail
+      let thumbnail = "";
+      try {
+        thumbnail = await compressImage(image.file);
+      } catch (e) {
+        console.warn("Thumbnail compression failed, publishing without thumbnail:", e);
+      }
+
+      // 3. Write to Firestore
       await publishQuestionToFirestore({
-        lat: loc.lat, lng: loc.lng, subject, difficulty,
-        question: result.question, hint: result.hint,
+        lat: loc.lat,
+        lng: loc.lng,
+        subject,
+        difficulty,
+        question: result.question,
+        hint: result.hint,
         learning_objective: result.learning_objective,
         image_analysis: result.image_analysis,
         why_this_image: result.why_this_image,
         thumbnail,
-        username: currentUser,
+        uid: user.uid,
+        displayName,
+        photoURL: photoURL || "",
       });
+
       setPublished(true);
-    } catch (err) { setError(err?.message || "Failed to publish."); }
-    finally { setPublishing(false); }
+    } catch (err) {
+      console.error("Publish failed:", err);
+      if (err.message?.includes("Location")) {
+        setGeoError(err.message);
+      } else {
+        setError(err.message || "Failed to publish question.");
+      }
+    } finally {
+      setPublishing(false);
+    }
   };
 
-  // ── Explore nearby ──
+  // ── Explore ──
   const loadExplore = useCallback(async (radius) => {
     setExploreLoading(true);
+    setGeoError(null);
     try {
-      const loc = await requestLocation();
+      const loc = await getLocation();
       setNearbyQuestions(await loadNearbyQuestions(loc.lat, loc.lng, radius));
-    } catch {}
-    finally { setExploreLoading(false); }
-  }, [requestLocation]);
+    } catch (err) {
+      if (err.message) setGeoError(err.message);
+    } finally {
+      setExploreLoading(false);
+    }
+  }, [getLocation]);
 
   useEffect(() => { if (tab === "explore") loadExplore(searchRadius); }, [tab]);
 
   // ── My Questions ──
   const loadMyQuestions = useCallback(async () => {
     setMyLoading(true);
-    try { setMyQuestions(await loadUserQuestions(currentUser)); }
+    try { setMyQuestions(await loadUserQuestions(user.uid)); }
     catch {}
     finally { setMyLoading(false); }
-  }, [currentUser]);
+  }, [user.uid]);
 
   useEffect(() => { if (tab === "my") loadMyQuestions(); }, [tab]);
 
@@ -456,13 +497,13 @@ function MainApp({ currentUser, onLogout }) {
   const handleReset = () => {
     if (image?.preview) URL.revokeObjectURL(image.preview);
     setImage(null); setSubject(null); setResult(null); setError(null);
-    setDifficulty("middle"); setPublished(false);
+    setDifficulty("middle"); setPublished(false); setGeoError(null);
   };
 
   const selectedSubject = SUBJECTS.find((s) => s.id === subject);
   const canGenerate = image && subject && !loading;
 
-  // ── Map component ──
+  // ── Map ──
   const renderMap = (height = 360) => {
     if (!userLocation) return null;
     return (
@@ -494,10 +535,8 @@ function MainApp({ currentUser, onLogout }) {
                       style={{ width: "100%", height: 100, objectFit: "cover", borderRadius: 6, marginBottom: 6 }} />}
                     <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 4px", lineHeight: 1.4, color: "#1A1A2E" }}>{q.question}</p>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-                      <span style={{ width: 16, height: 16, borderRadius: "50%", background: avatarColor(q.username || "?"), display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "#fff", fontWeight: 700 }}>
-                        {(q.username || "?")[0].toUpperCase()}
-                      </span>
-                      <span style={{ fontSize: 11, color: "#667085" }}>@{q.username}</span>
+                      {q.photoURL ? <img src={q.photoURL} alt="" style={{ width: 18, height: 18, borderRadius: "50%" }} /> : null}
+                      <span style={{ fontSize: 11, color: "#667085" }}>{q.displayName || "Anonymous"}</span>
                       <span style={{ fontSize: 11, color: "#98A2B3" }}>· {timeAgo(q.timestamp)}</span>
                     </div>
                   </div>
@@ -510,25 +549,23 @@ function MainApp({ currentUser, onLogout }) {
     );
   };
 
-  // ── Username badge component ──
-  const UserBadge = ({ name, size = "sm" }) => {
-    const s = size === "sm" ? 20 : 24;
-    const fs = size === "sm" ? 10 : 12;
-    return (
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-        <span style={{ width: s, height: s, borderRadius: "50%", background: avatarColor(name), display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: fs, color: "#fff", fontWeight: 700, flexShrink: 0 }}>
-          {name[0].toUpperCase()}
-        </span>
-        <span style={{ fontSize: size === "sm" ? 12 : 13, color: "#344054", fontWeight: 600 }}>@{name}</span>
-      </span>
-    );
-  };
+  // ── Author badge ──
+  const AuthorBadge = ({ q }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+      {q.photoURL ? <img src={q.photoURL} alt="" style={{ width: 18, height: 18, borderRadius: "50%" }} referrerPolicy="no-referrer" /> :
+        <span style={{ width: 18, height: 18, borderRadius: "50%", background: "#3A6BE8", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "#fff", fontWeight: 700 }}>
+          {(q.displayName || "?")[0].toUpperCase()}
+        </span>}
+      <span style={{ fontSize: 11, color: "#667085", fontWeight: 500 }}>{q.displayName || "Anonymous"}</span>
+      <span style={{ fontSize: 11, color: "#98A2B3" }}>· {timeAgo(q.timestamp)}</span>
+    </div>
+  );
 
   return (
     <div style={S.root}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-      {/* ── Header ── */}
+      {/* Header */}
       <header style={S.header}>
         <div style={S.headerLeft}>
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
@@ -545,31 +582,38 @@ function MainApp({ currentUser, onLogout }) {
           {userLocation && <div style={S.locBadge}><span style={S.locDot} /> GPS</div>}
           <div style={{ position: "relative" }}>
             <button onClick={() => setShowUserMenu(!showUserMenu)} style={S.userBtn}>
-              <span style={{ width: 28, height: 28, borderRadius: "50%", background: avatarColor(currentUser), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "#fff", fontWeight: 700 }}>
-                {currentUser[0].toUpperCase()}
-              </span>
-              <span style={{ fontSize: 13, fontWeight: 600, color: "#344054" }}>@{currentUser}</span>
+              {photoURL ?
+                <img src={photoURL} alt="" style={{ width: 28, height: 28, borderRadius: "50%" }} referrerPolicy="no-referrer" /> :
+                <span style={{ width: 28, height: 28, borderRadius: "50%", background: "#3A6BE8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "#fff", fontWeight: 700 }}>
+                  {displayName[0].toUpperCase()}
+                </span>}
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#344054", maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName}</span>
               <span style={{ fontSize: 10, color: "#98A2B3" }}>▾</span>
             </button>
             {showUserMenu && (
               <div style={S.userMenu}>
-                <p style={{ fontSize: 11, color: "#98A2B3", margin: "0 0 8px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                  Signed in as
-                </p>
-                <p style={{ fontSize: 14, fontWeight: 700, color: "#1A1A2E", margin: "0 0 12px" }}>@{currentUser}</p>
-                <button onClick={() => { setShowUserMenu(false); onLogout(); }} style={S.logoutBtn}>
-                  Sign Out
-                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                  {photoURL ?
+                    <img src={photoURL} alt="" style={{ width: 36, height: 36, borderRadius: "50%" }} referrerPolicy="no-referrer" /> :
+                    <span style={{ width: 36, height: 36, borderRadius: "50%", background: "#3A6BE8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: "#fff", fontWeight: 700 }}>
+                      {displayName[0].toUpperCase()}
+                    </span>}
+                  <div>
+                    <p style={{ fontSize: 14, fontWeight: 700, color: "#1A1A2E", margin: 0 }}>{displayName}</p>
+                    <p style={{ fontSize: 11, color: "#98A2B3", margin: 0 }}>{user.email}</p>
+                  </div>
+                </div>
+                <button onClick={() => { setShowUserMenu(false); signOut(auth); }}
+                  style={S.logoutBtn}>Sign Out</button>
               </div>
             )}
           </div>
         </div>
       </header>
 
-      {/* Click outside to close menu */}
       {showUserMenu && <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setShowUserMenu(false)} />}
 
-      {/* ── Tabs ── */}
+      {/* Tabs */}
       <nav style={S.tabBar}>
         {TABS.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
@@ -641,6 +685,7 @@ function MainApp({ currentUser, onLogout }) {
             </button>
 
             {error && <div style={S.errorBox}><span>⚠</span> {error}</div>}
+            {geoError && <div style={{ ...S.errorBox, background: "#FFF7ED", color: "#B54708" }}><span>📍</span> {geoError}</div>}
           </div>
 
           <div style={S.resultCol}>
@@ -700,7 +745,7 @@ function MainApp({ currentUser, onLogout }) {
                   ) : (
                     <div style={S.pubDone}>
                       <span style={{ color: "#12B76A", fontSize: 16 }}>✓</span>
-                      Published as @{currentUser}
+                      Published as {displayName}
                     </div>
                   )}
                 </div>
@@ -719,8 +764,6 @@ function MainApp({ currentUser, onLogout }) {
                     </div>
                   </div>
                 )}
-
-                {geoError && <p style={{ fontSize: 12, color: "#B42318", margin: "4px 0 0" }}>{geoError}</p>}
               </div>
             )}
           </div>
@@ -753,7 +796,7 @@ function MainApp({ currentUser, onLogout }) {
             </div>
           </div>
 
-          {geoError && <div style={{ ...S.errorBox, marginBottom: 16 }}><span>⚠</span> {geoError}</div>}
+          {geoError && <div style={{ ...S.errorBox, marginBottom: 16 }}><span>📍</span> {geoError}</div>}
 
           {exploreLoading ? (
             <div style={{ ...S.loadState, minHeight: 200 }}>
@@ -801,10 +844,7 @@ function MainApp({ currentUser, onLogout }) {
                               <span style={S.pinDist}>{formatDistance(q.distance)}</span>
                             </div>
                             <p style={S.pinQ}>{q.question}</p>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-                              <UserBadge name={q.username || "anon"} />
-                              <span style={{ fontSize: 11, color: "#98A2B3" }}>· {timeAgo(q.timestamp)}</span>
-                            </div>
+                            <AuthorBadge q={q} />
                           </div>
                           <span style={{ fontSize: 18, color: "#98A2B3", transition: "transform 0.2s", transform: open ? "rotate(180deg)" : "rotate(0)" }}>▾</span>
                         </div>
@@ -845,7 +885,7 @@ function MainApp({ currentUser, onLogout }) {
           <div style={{ ...S.exploreHead, marginBottom: 16 }}>
             <div>
               <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, margin: 0 }}>My Questions</h2>
-              <p style={{ fontSize: 12, color: "#98A2B3", margin: "4px 0 0" }}>Questions you've published as @{currentUser}</p>
+              <p style={{ fontSize: 12, color: "#98A2B3", margin: "4px 0 0" }}>Questions published by {displayName}</p>
             </div>
             <button onClick={loadMyQuestions} style={S.refBtn} title="Refresh">↻</button>
           </div>
@@ -915,7 +955,7 @@ const S = {
   locBadge: { display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, color: "#12B76A", background: "#ECFDF3", padding: "4px 10px", borderRadius: 20 },
   locDot: { width: 6, height: 6, borderRadius: "50%", background: "#12B76A" },
   userBtn: { display: "flex", alignItems: "center", gap: 8, padding: "4px 10px 4px 4px", borderRadius: 24, border: "1px solid #E8EAED", background: "#fff", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", transition: "all 0.15s" },
-  userMenu: { position: "absolute", top: "calc(100% + 6px)", right: 0, background: "#fff", borderRadius: 12, padding: "14px 18px", boxShadow: "0 8px 32px rgba(0,0,0,0.12)", border: "1px solid #E8EAED", zIndex: 99, minWidth: 180 },
+  userMenu: { position: "absolute", top: "calc(100% + 6px)", right: 0, background: "#fff", borderRadius: 12, padding: "16px 18px", boxShadow: "0 8px 32px rgba(0,0,0,0.12)", border: "1px solid #E8EAED", zIndex: 99, minWidth: 220 },
   logoutBtn: { width: "100%", padding: "8px 14px", borderRadius: 8, border: "1px solid #FCA5A5", background: "#FEF2F2", color: "#B42318", fontSize: 13, fontWeight: 600, fontFamily: "'DM Sans', sans-serif", cursor: "pointer" },
   tabBar: { display: "flex", gap: 4, padding: "8px 24px", background: "#fff", borderBottom: "1px solid #E8EAED" },
   tabBtn: { display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 8, border: "none", background: "transparent", color: "#667085", fontSize: 13, fontWeight: 600, fontFamily: "'DM Sans', sans-serif", cursor: "pointer", transition: "all 0.15s" },
