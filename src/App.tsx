@@ -354,6 +354,8 @@ function MainApp({ user }) {
   const [userLocation, setUserLocation] = useState(null);
   const [geoError, setGeoError] = useState(null);
   const [publishing, setPublishing] = useState(false);
+  const [publishStep, setPublishStep] = useState("");
+  const [publishError, setPublishError] = useState(null);
   const [published, setPublished] = useState(false);
 
   // Explore
@@ -413,32 +415,43 @@ function MainApp({ user }) {
   // ── Generate ──
   const handleGenerate = async () => {
     if (!image || !subject) return;
-    setLoading(true); setError(null); setResult(null); setPublished(false);
+    setLoading(true); setError(null); setResult(null); setPublished(false); setPublishError(null);
     try { setResult(await generateQuestionAPI(image.base64, image.mediaType, subject, difficulty)); }
     catch (err) { setError(err.message || "Failed to generate question."); }
     finally { setLoading(false); }
   };
 
-  // ── Publish — fixed flow ──
+  // ── Publish — with step tracking ──
   const handlePublish = async () => {
     if (!result) return;
     setPublishing(true);
-    setError(null);
-    setGeoError(null);
+    setPublishError(null);
+    setPublishStep("Getting your location…");
     try {
       // 1. Get location
-      const loc = await getLocation();
+      let loc;
+      try {
+        loc = await getLocation();
+      } catch (e) {
+        throw new Error("📍 Could not get your location. Please allow location access and try again.");
+      }
 
       // 2. Compress thumbnail
+      setPublishStep("Preparing image…");
       let thumbnail = "";
       try {
-        thumbnail = await compressImage(image.file);
+        thumbnail = await Promise.race([
+          compressImage(image.file),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
+        ]);
       } catch (e) {
-        console.warn("Thumbnail compression failed, publishing without thumbnail:", e);
+        console.warn("Thumbnail skipped:", e);
+        // Continue without thumbnail — not a fatal error
       }
 
       // 3. Write to Firestore
-      await publishQuestionToFirestore({
+      setPublishStep("Saving to database…");
+      await addDoc(collection(db, "questions"), {
         lat: loc.lat,
         lng: loc.lng,
         subject,
@@ -452,16 +465,16 @@ function MainApp({ user }) {
         uid: user.uid,
         displayName,
         photoURL: photoURL || "",
+        createdAt: serverTimestamp(),
+        timestamp: Date.now(),
       });
 
       setPublished(true);
+      setPublishStep("");
     } catch (err) {
       console.error("Publish failed:", err);
-      if (err.message?.includes("Location")) {
-        setGeoError(err.message);
-      } else {
-        setError(err.message || "Failed to publish question.");
-      }
+      setPublishError(err.message || "Failed to publish. Check console for details.");
+      setPublishStep("");
     } finally {
       setPublishing(false);
     }
@@ -497,7 +510,7 @@ function MainApp({ user }) {
   const handleReset = () => {
     if (image?.preview) URL.revokeObjectURL(image.preview);
     setImage(null); setSubject(null); setResult(null); setError(null);
-    setDifficulty("middle"); setPublished(false); setGeoError(null);
+    setDifficulty("middle"); setPublished(false); setGeoError(null); setPublishError(null);
   };
 
   const selectedSubject = SUBJECTS.find((s) => s.id === subject);
@@ -749,6 +762,23 @@ function MainApp({ user }) {
                     </div>
                   )}
                 </div>
+
+                {publishing && publishStep && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 8, background: "#EDF2FE", fontSize: 12, color: "#3A6BE8", fontWeight: 500 }}>
+                    <span style={{ ...S.spinner, width: 14, height: 14, borderWidth: 2, borderColor: "rgba(58,107,232,0.3)", borderTopColor: "#3A6BE8" }} />
+                    {publishStep}
+                  </div>
+                )}
+
+                {publishError && (
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 14px", borderRadius: 8, background: "#FEF0ED", color: "#B42318", fontSize: 13 }}>
+                    <span>⚠</span>
+                    <div>
+                      <p style={{ margin: 0, fontWeight: 600 }}>Failed to publish</p>
+                      <p style={{ margin: "4px 0 0", fontSize: 12 }}>{publishError}</p>
+                    </div>
+                  </div>
+                )}
 
                 {published && userLocation && (
                   <div style={{ marginTop: 4 }}>
