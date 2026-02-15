@@ -433,25 +433,29 @@ function MainApp({ user }) {
       try {
         loc = await getLocation();
       } catch (e) {
-        throw new Error("📍 Could not get your location. Please allow location access and try again.");
+        throw new Error("Could not get your location. Please allow location access and try again.");
       }
 
-      // 2. Compress thumbnail
+      // 2. Compress thumbnail (very small to stay under Firestore 1MB doc limit)
       setPublishStep("Preparing image…");
       let thumbnail = "";
       try {
         thumbnail = await Promise.race([
-          compressImage(image.file),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000)),
+          compressImage(image.file, 150, 0.4),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
         ]);
+        // Safety: if thumbnail is still too large (>500KB base64), skip it
+        if (thumbnail.length > 500000) {
+          console.warn("Thumbnail too large, skipping:", thumbnail.length);
+          thumbnail = "";
+        }
       } catch (e) {
         console.warn("Thumbnail skipped:", e);
-        // Continue without thumbnail — not a fatal error
       }
 
-      // 3. Write to Firestore
+      // 3. Write to Firestore with timeout
       setPublishStep("Saving to database…");
-      await addDoc(collection(db, "questions"), {
+      const docData = {
         lat: loc.lat,
         lng: loc.lng,
         subject,
@@ -465,15 +469,26 @@ function MainApp({ user }) {
         uid: user.uid,
         displayName,
         photoURL: photoURL || "",
-        createdAt: serverTimestamp(),
         timestamp: Date.now(),
-      });
+      };
 
+      // addDoc can hang if Firestore rules block the write (offline persistence keeps retrying)
+      // So we add a 10-second timeout
+      const writeResult = await Promise.race([
+        addDoc(collection(db, "questions"), docData),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(
+            "Firestore write timed out. Check that:\n1. Firestore is in test mode (Rules tab)\n2. Your Firebase config is correct\n3. Firestore database has been created"
+          )), 10000)
+        ),
+      ]);
+
+      console.log("Published successfully! Doc ID:", writeResult.id);
       setPublished(true);
       setPublishStep("");
     } catch (err) {
       console.error("Publish failed:", err);
-      setPublishError(err.message || "Failed to publish. Check console for details.");
+      setPublishError(err.message || "Failed to publish. Check browser console for details.");
       setPublishStep("");
     } finally {
       setPublishing(false);
@@ -775,7 +790,7 @@ function MainApp({ user }) {
                     <span>⚠</span>
                     <div>
                       <p style={{ margin: 0, fontWeight: 600 }}>Failed to publish</p>
-                      <p style={{ margin: "4px 0 0", fontSize: 12 }}>{publishError}</p>
+                      <p style={{ margin: "4px 0 0", fontSize: 12, whiteSpace: "pre-wrap" }}>{publishError}</p>
                     </div>
                   </div>
                 )}
