@@ -6,6 +6,7 @@ import "leaflet/dist/leaflet.css";
 import { db, auth, googleProvider } from "./firebase";
 import {
   collection, addDoc, getDocs, query, orderBy, limit, serverTimestamp,
+  doc, getDoc, setDoc, updateDoc, increment,
 } from "firebase/firestore";
 import {
   onAuthStateChanged, signInWithPopup, signOut,
@@ -34,6 +35,29 @@ const TABS = [
   { id: "explore", label: "Explore Nearby", icon: "◎" },
   { id: "my", label: "My Questions", icon: "✎" },
 ];
+
+// ─── Rarity system ───
+const RARITIES = [
+  { id: "common",    label: "Common",    points: 10,  color: "#667085", bg: "#F4F5F7", border: "#D0D5DD", glow: "none",                              weight: 50, icon: "○" },
+  { id: "uncommon",  label: "Uncommon",  points: 25,  color: "#2B7A5F", bg: "#ECFDF3", border: "#6CE9A6", glow: "none",                              weight: 30, icon: "◆" },
+  { id: "rare",      label: "Rare",      points: 50,  color: "#3A6BE8", bg: "#EDF2FE", border: "#93B4FD", glow: "0 0 8px rgba(58,107,232,0.3)",       weight: 13, icon: "★" },
+  { id: "epic",      label: "Epic",      points: 100, color: "#9B5DE5", bg: "#F4EDFB", border: "#C4A1F0", glow: "0 0 12px rgba(155,93,229,0.4)",      weight: 5,  icon: "◈" },
+  { id: "legendary", label: "Legendary", points: 250, color: "#D4851F", bg: "#FFF7ED", border: "#F6C270", glow: "0 0 16px rgba(212,133,31,0.5)",      weight: 2,  icon: "✦" },
+];
+
+function rollRarity() {
+  const totalWeight = RARITIES.reduce((sum, r) => sum + r.weight, 0);
+  let roll = Math.random() * totalWeight;
+  for (const r of RARITIES) {
+    roll -= r.weight;
+    if (roll <= 0) return r.id;
+  }
+  return "common";
+}
+
+function getRarity(id) {
+  return RARITIES.find((r) => r.id === id) || RARITIES[0];
+}
 
 // ─── Map icons ───
 function createSubjectIcon(color, icon) {
@@ -383,6 +407,12 @@ function MainApp({ user }) {
   const [myQuestions, setMyQuestions] = useState([]);
   const [myLoading, setMyLoading] = useState(false);
 
+  // Points system
+  const [userPoints, setUserPoints] = useState(0);
+  const [answeredIds, setAnsweredIds] = useState(new Set());
+  const [pointsPopup, setPointsPopup] = useState(null); // { points, rarity } for animation
+  const [questionRarity, setQuestionRarity] = useState(null); // rarity rolled for current create tab question
+
   // User menu
   const [showUserMenu, setShowUserMenu] = useState(false);
 
@@ -396,6 +426,55 @@ function MainApp({ user }) {
   // Display name helper
   const displayName = user.displayName || user.email?.split("@")[0] || "User";
   const photoURL = user.photoURL;
+
+  // ── Load user points & answered questions on mount ──
+  useEffect(() => {
+    (async () => {
+      try {
+        const userDoc = await getDoc(doc(db, "users", user.uid));
+        if (userDoc.exists()) {
+          setUserPoints(userDoc.data().points || 0);
+          setAnsweredIds(new Set(userDoc.data().answeredIds || []));
+        } else {
+          // Create user doc on first login
+          await setDoc(doc(db, "users", user.uid), {
+            displayName,
+            photoURL: photoURL || "",
+            points: 0,
+            answeredIds: [],
+          });
+        }
+      } catch (e) {
+        console.warn("Failed to load user points:", e);
+      }
+    })();
+  }, [user.uid]);
+
+  // ── Award points for correct answer ──
+  const awardPoints = useCallback(async (questionId, rarity) => {
+    if (answeredIds.has(questionId)) return; // already answered
+    const r = getRarity(rarity);
+    const pts = r.points;
+    try {
+      // Update Firestore
+      const userRef = doc(db, "users", user.uid);
+      await updateDoc(userRef, {
+        points: increment(pts),
+        answeredIds: [...answeredIds, questionId],
+      });
+      // Update local state
+      setUserPoints((p) => p + pts);
+      setAnsweredIds((prev) => new Set([...prev, questionId]));
+      // Show popup
+      setPointsPopup({ points: pts, rarity: r });
+      setTimeout(() => setPointsPopup(null), 2000);
+    } catch (e) {
+      console.warn("Failed to award points:", e);
+      // Still update locally for responsiveness
+      setUserPoints((p) => p + pts);
+      setAnsweredIds((prev) => new Set([...prev, questionId]));
+    }
+  }, [user.uid, answeredIds]);
 
   // ── Get location (caches in state) ──
   const getLocation = useCallback(async () => {
@@ -429,6 +508,7 @@ function MainApp({ user }) {
   const handleGenerate = async () => {
     if (!image || !subject) return;
     setLoading(true); setError(null); setResult(null); setPublished(false); setPublishError(null); setSelectedChoice(null);
+    setQuestionRarity(rollRarity());
     try { setResult(await generateQuestionAPI(image.base64, image.mediaType, subject, difficulty)); }
     catch (err) { setError(err.message || "Failed to generate question."); }
     finally { setLoading(false); }
@@ -473,6 +553,7 @@ function MainApp({ user }) {
         lng: loc.lng,
         subject,
         difficulty,
+        rarity: questionRarity || "common",
         question: result.question,
         choices: result.choices || {},
         correct_answer: result.correct_answer || "",
@@ -541,7 +622,7 @@ function MainApp({ user }) {
   const handleReset = () => {
     if (image?.preview) URL.revokeObjectURL(image.preview);
     setImage(null); setSubject(null); setResult(null); setError(null);
-    setDifficulty("middle"); setPublished(false); setGeoError(null); setPublishError(null); setSelectedChoice(null);
+    setDifficulty("middle"); setPublished(false); setGeoError(null); setPublishError(null); setSelectedChoice(null); setQuestionRarity(null);
   };
 
   const selectedSubject = SUBJECTS.find((s) => s.id === subject);
@@ -569,10 +650,15 @@ function MainApp({ user }) {
                 eventHandlers={{ click: () => setExpandedPin(i) }}>
                 <Popup maxWidth={280}>
                   <div style={{ fontFamily: "'DM Sans', sans-serif", padding: "4px 0" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
                       <span style={{ background: subj?.bg, color: subj?.color, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4 }}>
                         {subj?.icon} {subj?.label}
                       </span>
+                      {(() => { const r = getRarity(q.rarity || "common"); return (
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 10, background: r.bg, color: r.color, border: `1px solid ${r.border}` }}>
+                          {r.icon} {r.label}
+                        </span>
+                      ); })()}
                       <span style={{ fontSize: 11, color: "#667085" }}>{formatDistance(q.distance)}</span>
                     </div>
                     {q.thumbnail && <img src={`data:image/jpeg;base64,${q.thumbnail}`} alt=""
@@ -605,6 +691,23 @@ function MainApp({ user }) {
     </div>
   );
 
+  // ── Rarity badge ──
+  const RarityBadge = ({ rarityId, size = "sm" }) => {
+    const r = getRarity(rarityId);
+    const isSm = size === "sm";
+    return (
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: isSm ? 4 : 6,
+        padding: isSm ? "2px 8px" : "4px 12px", borderRadius: 20,
+        background: r.bg, border: `1.5px solid ${r.border}`, boxShadow: r.glow,
+        fontSize: isSm ? 10 : 12, fontWeight: 700, color: r.color,
+        letterSpacing: "0.02em", textTransform: "uppercase",
+      }}>
+        {r.icon} {r.label} · {r.points}pt
+      </span>
+    );
+  };
+
   return (
     <div style={S.root}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -624,6 +727,9 @@ function MainApp({ user }) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {userLocation && <div style={S.locBadge}><span style={S.locDot} /> GPS</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px", borderRadius: 20, background: "#FFFBF0", border: "1px solid #F6C270", fontSize: 13, fontWeight: 700, color: "#D4851F" }}>
+            ✦ {userPoints.toLocaleString()}
+          </div>
           <div style={{ position: "relative" }}>
             <button onClick={() => setShowUserMenu(!showUserMenu)} style={S.userBtn}>
               {photoURL ?
@@ -645,6 +751,13 @@ function MainApp({ user }) {
                   <div>
                     <p style={{ fontSize: 14, fontWeight: 700, color: "#1A1A2E", margin: 0 }}>{displayName}</p>
                     <p style={{ fontSize: 11, color: "#98A2B3", margin: 0 }}>{user.email}</p>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 8, background: "#FFFBF0", border: "1px solid #F6C270", marginBottom: 12 }}>
+                  <span style={{ fontSize: 18 }}>✦</span>
+                  <div>
+                    <p style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "#D4851F" }}>{userPoints.toLocaleString()} points</p>
+                    <p style={{ margin: 0, fontSize: 10, color: "#98A2B3", fontWeight: 600 }}>{answeredIds.size} questions answered</p>
                   </div>
                 </div>
                 <button onClick={() => { setShowUserMenu(false); signOut(auth); }}
@@ -761,7 +874,10 @@ function MainApp({ user }) {
                 </div>
 
                 <div style={{ ...S.qBox, borderLeftColor: selectedSubject?.color || "#1A1A2E" }}>
-                  <p style={{ ...S.metaLabel, marginBottom: 6 }}>{selectedSubject?.icon} {selectedSubject?.label} Question</p>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+                    <p style={{ ...S.metaLabel, margin: 0 }}>{selectedSubject?.icon} {selectedSubject?.label} Question</p>
+                    {questionRarity && <RarityBadge rarityId={questionRarity} />}
+                  </div>
                   <p style={S.qText}>{result.question}</p>
                 </div>
 
@@ -780,7 +896,16 @@ function MainApp({ user }) {
                       else if (isSelected && !isCorrect) { bg = "#FEF0ED"; border = "#E8553A"; textColor = "#B42318"; }
                       else if (answered) { bg = "#F9FAFB"; border = "#E8EAED"; textColor = "#98A2B3"; }
                       return (
-                        <button key={letter} onClick={() => { if (!selectedChoice) setSelectedChoice(letter); }}
+                        <button key={letter} onClick={() => {
+                            if (!selectedChoice) {
+                              setSelectedChoice(letter);
+                              if (letter === result.correct_answer) {
+                                // Use question text hash as temp ID for unpublished questions
+                                const tempId = "create_" + result.question.slice(0, 30).replace(/\s/g, "_");
+                                awardPoints(tempId, questionRarity || "common");
+                              }
+                            }
+                          }}
                           style={{
                             display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10,
                             border: `2px solid ${border}`, background: bg, cursor: answered ? "default" : "pointer",
@@ -805,23 +930,31 @@ function MainApp({ user }) {
                 )}
 
                 {/* Answer feedback */}
-                {selectedChoice && (
-                  <div style={{
-                    padding: "12px 14px", borderRadius: 8,
-                    background: selectedChoice === result.correct_answer ? "#ECFDF3" : "#FEF0ED",
-                    border: `1px solid ${selectedChoice === result.correct_answer ? "#A6F4C5" : "#FECDCA"}`,
-                  }}>
-                    <p style={{
-                      margin: 0, fontSize: 14, fontWeight: 700,
-                      color: selectedChoice === result.correct_answer ? "#027A48" : "#B42318",
+                {selectedChoice && (() => {
+                  const correct = selectedChoice === result.correct_answer;
+                  const r = getRarity(questionRarity || "common");
+                  return (
+                    <div style={{
+                      padding: "12px 14px", borderRadius: 8,
+                      background: correct ? "#ECFDF3" : "#FEF0ED",
+                      border: `1px solid ${correct ? "#A6F4C5" : "#FECDCA"}`,
                     }}>
-                      {selectedChoice === result.correct_answer ? "✓ Correct!" : `✕ Incorrect — the answer is ${result.correct_answer}`}
-                    </p>
-                    {result.explanation && (
-                      <p style={{ margin: "6px 0 0", fontSize: 13, color: "#344054", lineHeight: 1.5 }}>{result.explanation}</p>
-                    )}
-                  </div>
-                )}
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: correct ? "#027A48" : "#B42318" }}>
+                          {correct ? "✓ Correct!" : `✕ Incorrect — the answer is ${result.correct_answer}`}
+                        </p>
+                        {correct && (
+                          <span style={{ fontSize: 13, fontWeight: 700, color: r.color, animation: "fadeIn 0.3s ease" }}>
+                            +{r.points} pts
+                          </span>
+                        )}
+                      </div>
+                      {result.explanation && (
+                        <p style={{ margin: "6px 0 0", fontSize: 13, color: "#344054", lineHeight: 1.5 }}>{result.explanation}</p>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {!selectedChoice && (
                   <details style={S.hintBox}>
@@ -960,8 +1093,9 @@ function MainApp({ user }) {
                         <div style={S.pinHead}>
                           {q.thumbnail && <img src={`data:image/jpeg;base64,${q.thumbnail}`} alt="" style={S.pinThumb} />}
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={S.pinMeta}>
+                            <div style={{ ...S.pinMeta, flexWrap: "wrap" }}>
                               <span style={{ ...S.pinTag, background: subj?.bg, color: subj?.color }}>{subj?.icon} {subj?.label}</span>
+                              <RarityBadge rarityId={q.rarity || "common"} />
                               <span style={S.pinDist}>{formatDistance(q.distance)}</span>
                             </div>
                             <p style={S.pinQ}>{q.question}</p>
@@ -990,7 +1124,14 @@ function MainApp({ user }) {
                                   else if (isSelected && !isCorrect) { bg = "#FEF0ED"; border = "#E8553A"; tc = "#B42318"; }
                                   else if (answered) { bg = "#F9FAFB"; border = "#E8EAED"; tc = "#98A2B3"; }
                                   return (
-                                    <button key={letter} onClick={() => { if (!myChoice) setExploreChoices((p) => ({ ...p, [i]: letter })); }}
+                                    <button key={letter} onClick={() => {
+                                        if (!myChoice) {
+                                          setExploreChoices((p) => ({ ...p, [i]: letter }));
+                                          if (letter === q.correct_answer && q.id) {
+                                            awardPoints(q.id, q.rarity || "common");
+                                          }
+                                        }
+                                      }}
                                       style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 8,
                                         border: `2px solid ${border}`, background: bg, cursor: answered ? "default" : "pointer",
                                         transition: "all 0.2s", textAlign: "left", fontFamily: "'DM Sans', sans-serif" }}>
@@ -1007,17 +1148,25 @@ function MainApp({ user }) {
                               </div>
                             )}
 
-                            {exploreChoices[i] && (
-                              <div style={{ padding: "10px 12px", borderRadius: 8,
-                                background: exploreChoices[i] === q.correct_answer ? "#ECFDF3" : "#FEF0ED",
-                                border: `1px solid ${exploreChoices[i] === q.correct_answer ? "#A6F4C5" : "#FECDCA"}` }}>
-                                <p style={{ margin: 0, fontSize: 13, fontWeight: 700,
-                                  color: exploreChoices[i] === q.correct_answer ? "#027A48" : "#B42318" }}>
-                                  {exploreChoices[i] === q.correct_answer ? "✓ Correct!" : `✕ Incorrect — the answer is ${q.correct_answer}`}
-                                </p>
-                                {q.explanation && <p style={{ margin: "4px 0 0", fontSize: 12, color: "#344054", lineHeight: 1.5 }}>{q.explanation}</p>}
-                              </div>
-                            )}
+                            {exploreChoices[i] && (() => {
+                              const correct = exploreChoices[i] === q.correct_answer;
+                              const r = getRarity(q.rarity || "common");
+                              return (
+                                <div style={{ padding: "10px 12px", borderRadius: 8,
+                                  background: correct ? "#ECFDF3" : "#FEF0ED",
+                                  border: `1px solid ${correct ? "#A6F4C5" : "#FECDCA"}` }}>
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: correct ? "#027A48" : "#B42318" }}>
+                                      {correct ? "✓ Correct!" : `✕ Incorrect — the answer is ${q.correct_answer}`}
+                                    </p>
+                                    {correct && !answeredIds.has(q.id) && (
+                                      <span style={{ fontSize: 12, fontWeight: 700, color: r.color }}>+{r.points} pts</span>
+                                    )}
+                                  </div>
+                                  {q.explanation && <p style={{ margin: "4px 0 0", fontSize: 12, color: "#344054", lineHeight: 1.5 }}>{q.explanation}</p>}
+                                </div>
+                              );
+                            })()}
 
                             {!exploreChoices[i] && (
                               <details style={S.hintBox}>
@@ -1078,8 +1227,9 @@ function MainApp({ user }) {
                     <div style={S.pinHead}>
                       {q.thumbnail && <img src={`data:image/jpeg;base64,${q.thumbnail}`} alt="" style={S.pinThumb} />}
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={S.pinMeta}>
+                        <div style={{ ...S.pinMeta, flexWrap: "wrap" }}>
                           <span style={{ ...S.pinTag, background: subj?.bg, color: subj?.color }}>{subj?.icon} {subj?.label}</span>
+                          <RarityBadge rarityId={q.rarity || "common"} />
                           <span style={{ fontSize: 11, color: "#98A2B3" }}>{DIFFICULTY_LEVELS.find((d) => d.id === q.difficulty)?.label}</span>
                         </div>
                         <p style={S.pinQ}>{q.question}</p>
@@ -1097,10 +1247,41 @@ function MainApp({ user }) {
         </div>
       )}
 
+      {/* Floating points popup */}
+      {pointsPopup && (
+        <div style={{
+          position: "fixed", top: 80, right: 24, zIndex: 999,
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "14px 20px", borderRadius: 14,
+          background: "#fff", border: `2px solid ${pointsPopup.rarity.border}`,
+          boxShadow: `0 8px 32px rgba(0,0,0,0.12), ${pointsPopup.rarity.glow}`,
+          animation: "pointsFloat 2s ease forwards",
+          fontFamily: "'DM Sans', sans-serif",
+        }}>
+          <span style={{ fontSize: 24 }}>{pointsPopup.rarity.icon}</span>
+          <div>
+            <p style={{ margin: 0, fontSize: 18, fontWeight: 700, color: pointsPopup.rarity.color }}>
+              +{pointsPopup.points} pts
+            </p>
+            <p style={{ margin: 0, fontSize: 11, color: "#667085", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+              {pointsPopup.rarity.label} Question
+            </p>
+          </div>
+        </div>
+      )}
+
       <footer style={S.footer}>Powered by Claude Vision API — Geo-pinned learning for everyone</footer>
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes pulse{0%,100%{transform:scale(1);opacity:.6}50%{transform:scale(1.2);opacity:1}}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes pointsFloat{
+          0%{opacity:0;transform:translateY(20px) scale(0.8)}
+          15%{opacity:1;transform:translateY(0) scale(1.05)}
+          25%{transform:translateY(0) scale(1)}
+          80%{opacity:1;transform:translateY(0)}
+          100%{opacity:0;transform:translateY(-10px)}
+        }
         details>summary{list-style:none;cursor:pointer}
         details>summary::-webkit-details-marker{display:none}
         .leaflet-popup-content-wrapper{border-radius:10px!important;box-shadow:0 4px 16px rgba(0,0,0,0.12)!important}
