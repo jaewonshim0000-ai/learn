@@ -332,8 +332,8 @@ function LoginScreen() {
 }
 
 const LS = {
-  backdrop: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #F8F9FB 0%, #EDF2FE 100%)", fontFamily: "'DM Sans', sans-serif", padding: 24 },
-  card: { background: "#fff", borderRadius: 16, padding: "36px 32px", maxWidth: 400, width: "100%", boxShadow: "0 8px 32px rgba(26,26,46,0.08)", border: "1px solid #E8EAED" },
+  backdrop: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "linear-gradient(135deg, #F8F9FB 0%, #EDF2FE 100%)", fontFamily: "'DM Sans', sans-serif", padding: 16 },
+  card: { background: "#fff", borderRadius: 16, padding: "32px 24px", maxWidth: 400, width: "100%", boxShadow: "0 8px 32px rgba(26,26,46,0.08)", border: "1px solid #E8EAED" },
   logoRow: { display: "flex", alignItems: "center", gap: 12, marginBottom: 20 },
   title: { fontFamily: "'DM Serif Display', serif", fontSize: 22, margin: 0, letterSpacing: "-0.02em", color: "#1A1A2E" },
   subtitle: { fontSize: 10, color: "#667085", margin: 0, marginTop: 1, letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: 600 },
@@ -713,7 +713,7 @@ function MainApp({ user }) {
       <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
       {/* Header */}
-      <header style={S.header}>
+      <header className="ev-header" style={S.header}>
         <div style={S.headerLeft}>
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
             <rect width="28" height="28" rx="6" fill="#1A1A2E" />
@@ -722,12 +722,12 @@ function MainApp({ user }) {
           </svg>
           <div>
             <h1 style={S.title}>EduVision</h1>
-            <p style={S.subtitle}>AI Questions · Geo-Pinned Learning</p>
+            <p className="ev-subtitle" style={S.subtitle}>AI Questions · Geo-Pinned Learning</p>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {userLocation && <div style={S.locBadge}><span style={S.locDot} /> GPS</div>}
-          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px", borderRadius: 20, background: "#FFFBF0", border: "1px solid #F6C270", fontSize: 13, fontWeight: 700, color: "#D4851F" }}>
+        <div className="ev-header-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {userLocation && <div className="ev-gps-badge" style={S.locBadge}><span style={S.locDot} /> GPS</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 10px", borderRadius: 20, background: "#FFFBF0", border: "1px solid #F6C270", fontSize: 12, fontWeight: 700, color: "#D4851F" }}>
             ✦ {userPoints.toLocaleString()}
           </div>
           <div style={{ position: "relative" }}>
@@ -737,7 +737,7 @@ function MainApp({ user }) {
                 <span style={{ width: 28, height: 28, borderRadius: "50%", background: "#3A6BE8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "#fff", fontWeight: 700 }}>
                   {displayName[0].toUpperCase()}
                 </span>}
-              <span style={{ fontSize: 13, fontWeight: 600, color: "#344054", maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName}</span>
+              <span className="ev-user-name" style={{ fontSize: 13, fontWeight: 600, color: "#344054", maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayName}</span>
               <span style={{ fontSize: 10, color: "#98A2B3" }}>▾</span>
             </button>
             {showUserMenu && (
@@ -771,7 +771,7 @@ function MainApp({ user }) {
       {showUserMenu && <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setShowUserMenu(false)} />}
 
       {/* Tabs */}
-      <nav style={S.tabBar}>
+      <nav className="ev-tabbar" style={S.tabBar}>
         {TABS.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
             style={{ ...S.tabBtn, ...(tab === t.id ? S.tabBtnActive : {}) }}>
@@ -782,7 +782,7 @@ function MainApp({ user }) {
 
       {/* ══════════ CREATE TAB ══════════ */}
       {tab === "create" && (
-        <div style={S.mainGrid}>
+        <div className="ev-main-grid">
           <div style={S.controlsCol}>
             <section style={S.card}>
               <h2 style={S.sectionTitle}><span style={S.stepBadge}>1</span> Upload Image</h2>
@@ -864,7 +864,7 @@ function MainApp({ user }) {
               </div>
             )}
             {result && (
-              <div style={S.resCard}>
+              <div className="ev-res-card" style={S.resCard}>
                 <div style={S.analysisBanner}>
                   <div style={S.dot} />
                   <div>
@@ -878,7 +878,7 @@ function MainApp({ user }) {
                     <p style={{ ...S.metaLabel, margin: 0 }}>{selectedSubject?.icon} {selectedSubject?.label} Question</p>
                     {questionRarity && <RarityBadge rarityId={questionRarity} />}
                   </div>
-                  <p style={S.qText}>{result.question}</p>
+                  <p className="ev-q-text" style={S.qText}>{result.question}</p>
                 </div>
 
                 {/* Multiple Choice Options */}
@@ -963,7 +963,7 @@ function MainApp({ user }) {
                   </details>
                 )}
 
-                <div style={S.metaGrid}>
+                <div className="ev-meta-grid" style={S.metaGrid}>
                   <div style={S.metaItem}><p style={S.metaLabel}>Learning Objective</p><p style={S.metaVal}>{result.learning_objective}</p></div>
                   <div style={S.metaItem}><p style={S.metaLabel}>Image Connection</p><p style={S.metaVal}>{result.why_this_image}</p></div>
                 </div>
@@ -1026,7 +1026,7 @@ function MainApp({ user }) {
 
       {/* ══════════ EXPLORE TAB ══════════ */}
       {tab === "explore" && (
-        <div style={S.exploreWrap}>
+        <div className="ev-explore-wrap" style={S.exploreWrap}>
           <div style={S.exploreHead}>
             <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, margin: 0 }}>Nearby Questions</h2>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -1198,7 +1198,7 @@ function MainApp({ user }) {
 
       {/* ══════════ MY QUESTIONS TAB ══════════ */}
       {tab === "my" && (
-        <div style={S.exploreWrap}>
+        <div className="ev-explore-wrap" style={S.exploreWrap}>
           <div style={{ ...S.exploreHead, marginBottom: 16 }}>
             <div>
               <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, margin: 0 }}>My Questions</h2>
@@ -1249,7 +1249,7 @@ function MainApp({ user }) {
 
       {/* Floating points popup */}
       {pointsPopup && (
-        <div style={{
+        <div className="ev-points-popup" style={{
           position: "fixed", top: 80, right: 24, zIndex: 999,
           display: "flex", alignItems: "center", gap: 10,
           padding: "14px 20px", borderRadius: 14,
@@ -1287,6 +1287,40 @@ function MainApp({ user }) {
         .leaflet-popup-content-wrapper{border-radius:10px!important;box-shadow:0 4px 16px rgba(0,0,0,0.12)!important}
         .leaflet-popup-content{margin:10px 12px!important}
         .leaflet-container{font-family:'DM Sans',sans-serif!important}
+
+        /* ── Desktop defaults ── */
+        .ev-main-grid{display:grid;grid-template-columns:380px 1fr;gap:24px;max-width:1040px;margin:24px auto;padding:0 24px;align-items:start}
+
+        /* ── Tablet (≤900px) ── */
+        @media(max-width:900px){
+          .ev-main-grid{grid-template-columns:320px 1fr;gap:16px;padding:0 16px}
+        }
+
+        /* ── Mobile (≤768px) ── */
+        @media(max-width:768px){
+          .ev-main-grid{grid-template-columns:1fr!important;gap:16px;max-width:100%;margin:16px auto;padding:0 14px}
+          .ev-header{padding:10px 14px!important}
+          .ev-subtitle{display:none!important}
+          .ev-tabbar{padding:6px 10px!important;gap:2px!important}
+          .ev-tabbar button{padding:7px 10px!important;font-size:12px!important}
+          .ev-explore-wrap{padding:0 14px!important;margin:16px auto!important}
+          .ev-meta-grid{grid-template-columns:1fr!important}
+          .ev-res-card{padding:16px!important}
+          .ev-user-name{display:none!important}
+          .ev-q-text{font-size:16px!important}
+          .ev-points-popup{right:50%!important;transform:translateX(50%);top:70px!important}
+        }
+
+        /* ── Small phone (≤480px) ── */
+        @media(max-width:480px){
+          .ev-main-grid{padding:0 10px}
+          .ev-header{padding:8px 10px!important}
+          .ev-tabbar{padding:4px 6px!important;overflow-x:auto;-webkit-overflow-scrolling:touch}
+          .ev-tabbar button{padding:6px 8px!important;font-size:11px!important;white-space:nowrap}
+          .ev-explore-wrap{padding:0 10px!important}
+          .ev-gps-badge{display:none!important}
+          .ev-header-right{gap:6px!important}
+        }
       `}</style>
     </div>
   );
